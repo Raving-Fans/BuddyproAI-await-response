@@ -3,12 +3,17 @@ const app = express();
 app.use(express.json());
 
 // ─────────────────────────────────────────────────────────────
-// HIER MUSST DU DEINEN BUDDYPRO API KEY EINTRAGEN
-// Ersetze "DEIN_BUDDYPRO_API_KEY" mit deinem echten Key
-// Den Key findest du in BuddyPro indem du /generateApiKey:zapier
-// an deinen BuddyPro Telegram Bot schickst
+// API KEY wird als Environment Variable geladen - NICHT hier eintragen
+// Den Key traegst du direkt in Railway unter "Variables" ein:
+// Name:  BUDDYPRO_API_KEY
+// Value: bapi_xxxxxxxxxxxx  (dein echter Key)
 // ─────────────────────────────────────────────────────────────
-const BUDDYPRO_API_KEY = 'DEIN_BUDDYPRO_API_KEY';
+const BUDDYPRO_API_KEY = process.env.BUDDYPRO_API_KEY;
+
+if (!BUDDYPRO_API_KEY) {
+  console.error('FEHLER: Environment Variable BUDDYPRO_API_KEY ist nicht gesetzt');
+  process.exit(1);
+}
 
 // Gesundheitscheck - zum Testen ob der Server läuft
 app.get('/', (req, res) => {
@@ -146,6 +151,7 @@ Regeln:
         body: JSON.stringify({
           coaching_nachricht: `Fehler bei der Verarbeitung fuer ${email}: ${err.message}`,
           kunde_email: email,
+          datum: datum,
           success: false
         })
       });
