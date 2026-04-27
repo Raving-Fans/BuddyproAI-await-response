@@ -1,6 +1,5 @@
-const express = require('express');
-const app = express();
-app.use(express.json());
+const http = require('http');
+const https = require('https');
 
 // ─────────────────────────────────────────────────────────────
 // API KEY wird als Environment Variable geladen - NICHT hier eintragen
@@ -15,47 +14,79 @@ if (!BUDDYPRO_API_KEY) {
   process.exit(1);
 }
 
-// Gesundheitscheck - zum Testen ob der Server läuft
-app.get('/', (req, res) => {
-  res.json({ status: 'BuddyPro Bridge läuft', timestamp: new Date().toISOString() });
-});
+// Hilfsfunktion: JSON POST Request senden
+function postJSON(url, body, extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const parsed = new URL(url);
+    const headers = {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(data),
+      ...extraHeaders
+    };
 
-// Haupt-Endpoint: empfängt Daten von Zap 1
-app.post('/request', async (req, res) => {
+    const options = {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: 'POST',
+      headers
+    };
 
-  // Sofort 200 an Zap 1 zurückgeben
-  // Damit ist Zap 1 fertig und hat kein Timeout-Problem mehr
-  res.json({ success: true, message: 'Anfrage wird verarbeitet' });
+    const req = (parsed.protocol === 'https:' ? https : http).request(options, (res) => {
+      let raw = '';
+      res.on('data', chunk => raw += chunk);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); }
+        catch (e) { reject(new Error(`JSON Parse Fehler: ${raw.slice(0, 200)}`)); }
+      });
+    });
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
 
-  // Ab hier läuft alles asynchron - kein Timeout-Limit mehr
-  const {
-    email,
-    datum,
-    gewohnheiten,
-    support_note,
-    umsetzung_note,
-    energie_note,
-    groesster_sieg,
-    gut_funktioniert,
-    nicht_gut_funktioniert,
-    herausforderungen,
-    prioritaet,
-    naechste_woche,
-    fitter_momente,
-    feedback_an_uns,
-    zap2_webhook_url   // Zap 2 Webhook URL - wird von Zap 1 mitgeschickt
-  } = req.body;
+// HTTP Server
+const server = http.createServer((req, res) => {
 
-  // Validierung: ohne Webhook URL können wir die Antwort nirgendwo hinschicken
-  if (!zap2_webhook_url) {
-    console.error('Fehler: zap2_webhook_url fehlt im Request Body');
+  // Gesundheitscheck
+  if (req.method === 'GET' && req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'BuddyPro Bridge laeuft', timestamp: new Date().toISOString() }));
     return;
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // PROMPT - Vollstaendige Version mit allen Regeln
-  // ─────────────────────────────────────────────────────────────
-  const prompt = `Wochenrueckblick eingegangen von: ${email}
+  // Haupt-Endpoint
+  if (req.method === 'POST' && req.url === '/request') {
+    let raw = '';
+    req.on('data', chunk => raw += chunk);
+    req.on('end', async () => {
+
+      // Sofort 200 zurueckgeben - Zap 1 ist damit fertig
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'Anfrage wird verarbeitet' }));
+
+      // Ab hier laeuft alles asynchron - kein Timeout-Limit mehr
+      let body;
+      try { body = JSON.parse(raw); }
+      catch (e) { console.error('Fehler beim Parsen des Request Body:', e.message); return; }
+
+      const {
+        email, datum, gewohnheiten,
+        support_note, umsetzung_note, energie_note,
+        groesster_sieg, gut_funktioniert, nicht_gut_funktioniert,
+        herausforderungen, prioritaet, naechste_woche,
+        fitter_momente, feedback_an_uns, zap2_webhook_url
+      } = body;
+
+      if (!zap2_webhook_url) {
+        console.error('Fehler: zap2_webhook_url fehlt im Request Body');
+        return;
+      }
+
+      const prompt = `Ignoriere vorherige Coaching-Nachrichten. Verfasse eine einzige neue Coaching-Nachricht fuer den unten beschriebenen Klienten.
+
+Wochenrueckblick eingegangen von: ${email}
 Datum: ${datum}
 
 BEWERTUNGEN
@@ -78,6 +109,8 @@ Eine Sache die er besser machen will: ${naechste_woche}
 FEEDBACK AN UNS
 Verbesserungsvorschlaege: ${feedback_an_uns}
 
+WICHTIG: Ignoriere alle vorherigen Nachrichten in deinem Gedaechtnis. Antworte ausschliesslich auf die obigen Daten dieser einzelnen Person. Erstelle NUR eine einzige Coaching-Nachricht fuer genau diese eine Person.
+
 Erstelle jetzt eine fertige Coaching-Nachricht auf Deutsch, die direkt per Telegram an diesen Kunden gesendet werden kann.
 
 Regeln:
@@ -89,79 +122,66 @@ Regeln:
 6. Ton: emphatisch, klar, persoenlich
 7. Laenge: 4-6 kurze Absaetze, gut lesbar auf dem Handy
 8. Keine Emojis
-9. Kein Satz am Ende wie "Bei Fragen melde dich" - das ist selbstverstaendlich`;
+9. Kein Satz am Ende wie "Bei Fragen melde dich" - das ist selbstverstaendlich
+10. Antworte mit genau einer Nachricht, keine Trennlinien, keine Auflistung mehrerer Personen`;
 
-  try {
-    console.log(`Sende Anfrage an BuddyPro fuer: ${email}`);
+      try {
+        console.log(`Sende Anfrage an BuddyPro fuer: ${email}`);
 
-    // BuddyPro anfragen - wartet so lange wie noetig, kein Timeout
-    const buddyResponse = await fetch('https://api.buddypro.ai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${BUDDYPRO_API_KEY}`,
-        'Content-Type': 'application/json',
-        'X-Client-Request-Id': `bridge-${Date.now()}`
-      },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
+        const buddyResult = await postJSON(
+          'https://api.buddypro.ai/v1/chat/completions',
+          { messages: [{ role: 'user', content: prompt }] },
+          {
+            'Authorization': `Bearer ${BUDDYPRO_API_KEY}`,
+            'X-Client-Request-Id': `bridge-${Date.now()}`
+          }
+        );
 
-    const buddyData = await buddyResponse.json();
+        if (buddyResult.body.error) {
+          throw new Error(`BuddyPro Fehler: ${buddyResult.body.error.message} (Code: ${buddyResult.body.error.code})`);
+        }
 
-    // Fehler von BuddyPro abfangen
-    if (buddyData.error) {
-      throw new Error(`BuddyPro Fehler: ${buddyData.error.message} (Code: ${buddyData.error.code})`);
-    }
+        const nachricht = buddyResult.body.choices?.[0]?.message?.content;
+        if (!nachricht) throw new Error('BuddyPro hat eine leere Antwort zurueckgegeben');
 
-    const nachricht = buddyData.choices?.[0]?.message?.content;
+        console.log(`Antwort von BuddyPro erhalten fuer: ${email}`);
 
-    if (!nachricht) {
-      throw new Error('BuddyPro hat eine leere Antwort zurueckgegeben');
-    }
-
-    console.log(`Antwort von BuddyPro erhalten fuer: ${email}`);
-
-    // Coaching-Nachricht an Zap 2 schicken
-    const zap2Response = await fetch(zap2_webhook_url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        coaching_nachricht: nachricht,
-        kunde_email: email,
-        success: true
-      })
-    });
-
-    if (!zap2Response.ok) {
-      throw new Error(`Zap 2 Webhook Fehler: HTTP ${zap2Response.status}`);
-    }
-
-    console.log(`Nachricht erfolgreich an Zap 2 gesendet fuer: ${email}`);
-
-  } catch (err) {
-    console.error(`Fehler bei Verarbeitung fuer ${email}:`, err.message);
-
-    // Fehlermeldung ebenfalls an Zap 2 schicken
-    // So bekommst du auch bei Fehlern eine Nachricht und weisst Bescheid
-    try {
-      await fetch(zap2_webhook_url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          coaching_nachricht: `Fehler bei der Verarbeitung fuer ${email}: ${err.message}`,
+        const zap2Result = await postJSON(zap2_webhook_url, {
+          coaching_nachricht: nachricht,
           kunde_email: email,
           datum: datum,
-          success: false
-        })
-      });
-    } catch (webhookErr) {
-      console.error('Konnte Fehler nicht an Zap 2 melden:', webhookErr.message);
-    }
+          success: true
+        });
+
+        if (zap2Result.status < 200 || zap2Result.status >= 300) {
+          throw new Error(`Zap 2 Webhook Fehler: HTTP ${zap2Result.status}`);
+        }
+
+        console.log(`Nachricht erfolgreich an Zap 2 gesendet fuer: ${email}`);
+
+      } catch (err) {
+        console.error(`Fehler bei Verarbeitung fuer ${email}:`, err.message);
+        try {
+          await postJSON(zap2_webhook_url, {
+            coaching_nachricht: `Fehler bei der Verarbeitung fuer ${email}: ${err.message}`,
+            kunde_email: email,
+            datum: datum,
+            success: false
+          });
+        } catch (webhookErr) {
+          console.error('Konnte Fehler nicht an Zap 2 melden:', webhookErr.message);
+        }
+      }
+    });
+    return;
   }
+
+  // Alle anderen Routen
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not found' }));
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`BuddyPro Bridge laeuft auf Port ${PORT}`);
 });
