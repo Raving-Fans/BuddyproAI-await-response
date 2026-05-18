@@ -130,7 +130,10 @@ Regeln:
 
         const buddyResult = await postJSON(
           'https://api.buddypro.ai/v1/chat/completions',
-          { messages: [{ role: 'user', content: prompt }] },
+          { 
+            user: `client-${email.replace(/[^a-zA-Z0-9]/g, '-')}`,
+            messages: [{ role: 'user', content: prompt }] 
+          },
           {
             'Authorization': `Bearer ${BUDDYPRO_API_KEY}`,
             'X-Client-Request-Id': `bridge-${Date.now()}`
